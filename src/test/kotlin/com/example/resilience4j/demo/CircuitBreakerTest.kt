@@ -7,6 +7,7 @@ import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry
 import io.vavr.control.Try
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Test
+import java.io.FileNotFoundException
 import java.time.Duration
 import java.util.*
 
@@ -26,6 +27,115 @@ class CircuitBreakerTest {
         .build()
 
     private val registry: CircuitBreakerRegistry = CircuitBreakerRegistry.of(config)
+
+    @Test
+    fun `circuit breaker should switch between open, half open and closed`() {
+        val mockService = MockService()
+        val circuitBreaker = registry.circuitBreaker(UUID.randomUUID().toString())
+
+        val supplierSuccess = circuitBreaker.decorateCheckedSupplier(mockService::doSuccess)
+        val supplierError = circuitBreaker.decorateCheckedSupplier(mockService::doError)
+
+        (1..7).forEach {
+            Try.of(supplierSuccess)
+
+            assertEquals(State.CLOSED, circuitBreaker.state)
+            assertEquals(it, circuitBreaker.metrics.numberOfBufferedCalls)
+            assertEquals(0, circuitBreaker.metrics.numberOfFailedCalls)
+            assertEquals(0, circuitBreaker.metrics.numberOfNotPermittedCalls)
+            assertEquals(it, circuitBreaker.metrics.numberOfSuccessfulCalls)
+            assertEquals(0, circuitBreaker.metrics.numberOfSlowFailedCalls)
+        }
+
+        repeat(15) {
+            Try.of(supplierSuccess)
+
+            assertEquals(State.CLOSED, circuitBreaker.state)
+            assertEquals(7, circuitBreaker.metrics.numberOfBufferedCalls)
+            assertEquals(0, circuitBreaker.metrics.numberOfFailedCalls)
+            assertEquals(0, circuitBreaker.metrics.numberOfNotPermittedCalls)
+            assertEquals(7, circuitBreaker.metrics.numberOfSuccessfulCalls)
+            assertEquals(0, circuitBreaker.metrics.numberOfSlowFailedCalls)
+        }
+
+        var numberOfSuccessfulCalls = 6
+        (1..3).forEach {
+            Try.of(supplierError)
+
+            assertEquals(State.CLOSED, circuitBreaker.state)
+            assertEquals(7, circuitBreaker.metrics.numberOfBufferedCalls)
+            assertEquals(it, circuitBreaker.metrics.numberOfFailedCalls)
+            assertEquals(0, circuitBreaker.metrics.numberOfNotPermittedCalls)
+            assertEquals(numberOfSuccessfulCalls--, circuitBreaker.metrics.numberOfSuccessfulCalls)
+            assertEquals(0, circuitBreaker.metrics.numberOfSlowFailedCalls)
+        }
+
+        Try.of(supplierError)
+
+        assertEquals(State.OPEN, circuitBreaker.state)
+        assertEquals(7, circuitBreaker.metrics.numberOfBufferedCalls)
+        assertEquals(4, circuitBreaker.metrics.numberOfFailedCalls)
+        assertEquals(0, circuitBreaker.metrics.numberOfNotPermittedCalls)
+        assertEquals(numberOfSuccessfulCalls, circuitBreaker.metrics.numberOfSuccessfulCalls)
+        assertEquals(0, circuitBreaker.metrics.numberOfSlowFailedCalls)
+
+        (1..15L).forEach {
+            Try.of(supplierError)
+
+            assertEquals(State.OPEN, circuitBreaker.state)
+            assertEquals(7, circuitBreaker.metrics.numberOfBufferedCalls)
+            assertEquals(4, circuitBreaker.metrics.numberOfFailedCalls)
+            assertEquals(it, circuitBreaker.metrics.numberOfNotPermittedCalls)
+            assertEquals(numberOfSuccessfulCalls, circuitBreaker.metrics.numberOfSuccessfulCalls)
+            assertEquals(0, circuitBreaker.metrics.numberOfSlowFailedCalls)
+        }
+
+        var numberOfNotPermittedCalls = 16L
+        repeat(15) {
+            Try.of(supplierSuccess)
+
+            assertEquals(State.OPEN, circuitBreaker.state)
+            assertEquals(7, circuitBreaker.metrics.numberOfBufferedCalls)
+            assertEquals(4, circuitBreaker.metrics.numberOfFailedCalls)
+            assertEquals(numberOfNotPermittedCalls++, circuitBreaker.metrics.numberOfNotPermittedCalls)
+            assertEquals(numberOfSuccessfulCalls, circuitBreaker.metrics.numberOfSuccessfulCalls)
+            assertEquals(0, circuitBreaker.metrics.numberOfSlowFailedCalls)
+        }
+
+        Thread.sleep(durationInOpenState.toMillis())
+        (1..3).forEach {
+            Try.of(supplierSuccess)
+
+            assertEquals(State.HALF_OPEN, circuitBreaker.state)
+            assertEquals(it, circuitBreaker.metrics.numberOfBufferedCalls)
+            assertEquals(0, circuitBreaker.metrics.numberOfFailedCalls)
+            assertEquals(0, circuitBreaker.metrics.numberOfNotPermittedCalls)
+            assertEquals(it, circuitBreaker.metrics.numberOfSuccessfulCalls)
+            assertEquals(0, circuitBreaker.metrics.numberOfSlowFailedCalls)
+        }
+
+        (0..7).forEach {
+            Try.of(supplierSuccess)
+
+            assertEquals(State.CLOSED, circuitBreaker.state)
+            assertEquals(it, circuitBreaker.metrics.numberOfBufferedCalls)
+            assertEquals(0, circuitBreaker.metrics.numberOfFailedCalls)
+            assertEquals(0, circuitBreaker.metrics.numberOfNotPermittedCalls)
+            assertEquals(it, circuitBreaker.metrics.numberOfSuccessfulCalls)
+            assertEquals(0, circuitBreaker.metrics.numberOfSlowFailedCalls)
+        }
+
+        repeat(50) {
+            Try.of(supplierSuccess)
+
+            assertEquals(State.CLOSED, circuitBreaker.state)
+            assertEquals(7, circuitBreaker.metrics.numberOfBufferedCalls)
+            assertEquals(0, circuitBreaker.metrics.numberOfFailedCalls)
+            assertEquals(0, circuitBreaker.metrics.numberOfNotPermittedCalls)
+            assertEquals(7, circuitBreaker.metrics.numberOfSuccessfulCalls)
+            assertEquals(0, circuitBreaker.metrics.numberOfSlowFailedCalls)
+        }
+    }
 
     @Test
     fun `circuit breaker should change from closed to open when error calls count is less than sliding window size`() {
@@ -198,5 +308,72 @@ class CircuitBreakerTest {
             assertEquals(1, circuitBreaker.metrics.numberOfSuccessfulCalls)
             assertEquals(0, circuitBreaker.metrics.numberOfSlowFailedCalls)
         }
+    }
+
+    @Test
+    fun `circuit breaker should be closed when error calls is ignored`() {
+        val mockService = MockService()
+        val circuitBreaker = registry.circuitBreaker(UUID.randomUUID().toString())
+
+        val supplierSuccess = circuitBreaker.decorateCheckedSupplier(mockService::doSuccess)
+        val supplierError = circuitBreaker.decorateCheckedSupplier(mockService::doError)
+        val supplierUnexpectedError = circuitBreaker.decorateCheckedSupplier { throw FileNotFoundException() }
+
+        (1..7).forEach {
+            Try.of(supplierUnexpectedError)
+
+            assertEquals(State.CLOSED, circuitBreaker.state)
+            assertEquals(it, circuitBreaker.metrics.numberOfBufferedCalls)
+            assertEquals(0, circuitBreaker.metrics.numberOfFailedCalls)
+            assertEquals(0, circuitBreaker.metrics.numberOfNotPermittedCalls)
+            assertEquals(it, circuitBreaker.metrics.numberOfSuccessfulCalls)
+            assertEquals(0, circuitBreaker.metrics.numberOfSlowFailedCalls)
+        }
+
+        repeat(50) {
+            Try.of(supplierUnexpectedError)
+
+            assertEquals(State.CLOSED, circuitBreaker.state)
+            assertEquals(7, circuitBreaker.metrics.numberOfBufferedCalls)
+            assertEquals(0, circuitBreaker.metrics.numberOfFailedCalls)
+            assertEquals(0, circuitBreaker.metrics.numberOfNotPermittedCalls)
+            assertEquals(7, circuitBreaker.metrics.numberOfSuccessfulCalls)
+            assertEquals(0, circuitBreaker.metrics.numberOfSlowFailedCalls)
+        }
+
+        Try.of(supplierSuccess)
+
+        assertEquals(State.CLOSED, circuitBreaker.state)
+        assertEquals(7, circuitBreaker.metrics.numberOfBufferedCalls)
+        assertEquals(0, circuitBreaker.metrics.numberOfFailedCalls)
+        assertEquals(0, circuitBreaker.metrics.numberOfNotPermittedCalls)
+        assertEquals(7, circuitBreaker.metrics.numberOfSuccessfulCalls)
+        assertEquals(0, circuitBreaker.metrics.numberOfSlowFailedCalls)
+
+        Try.of(supplierError)
+
+        assertEquals(State.CLOSED, circuitBreaker.state)
+        assertEquals(7, circuitBreaker.metrics.numberOfBufferedCalls)
+        assertEquals(1, circuitBreaker.metrics.numberOfFailedCalls)
+        assertEquals(0, circuitBreaker.metrics.numberOfNotPermittedCalls)
+        assertEquals(6, circuitBreaker.metrics.numberOfSuccessfulCalls)
+        assertEquals(0, circuitBreaker.metrics.numberOfSlowFailedCalls)
+    }
+
+    @Test
+    fun `circuit breaker should be open when error class inherits from the record error`() {
+        val circuitBreaker = registry.circuitBreaker(UUID.randomUUID().toString())
+
+        val supplierError = circuitBreaker.decorateCheckedSupplier { throw IllegalArgumentException() }
+
+        Try.of(supplierError)
+        Try.of(supplierError)
+
+        assertEquals(State.CLOSED, circuitBreaker.state)
+        assertEquals(2, circuitBreaker.metrics.numberOfBufferedCalls)
+        assertEquals(2, circuitBreaker.metrics.numberOfFailedCalls)
+        assertEquals(0, circuitBreaker.metrics.numberOfNotPermittedCalls)
+        assertEquals(0, circuitBreaker.metrics.numberOfSuccessfulCalls)
+        assertEquals(0, circuitBreaker.metrics.numberOfSlowFailedCalls)
     }
 }
