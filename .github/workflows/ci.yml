@@ -91,4 +91,4 @@ jobs:
           distribution: 'adopt'
 
       - name: Test
-        run: ./gradlew test --tests
+        run: ./gradlew test
